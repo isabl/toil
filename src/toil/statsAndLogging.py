@@ -109,7 +109,12 @@ class StatsAndLogging( object ):
         startClock = getTotalCpuTime()
 
         def callback(fileHandle):
-            stats = json.load(fileHandle, object_hook=Expando)
+            try:
+                stats = json.load(fileHandle, object_hook=Expando)
+            except ValueError:
+                # don't fail if json is corrupted
+                return
+
             try:
                 logs = stats.workers.logsToMaster
             except AttributeError:
