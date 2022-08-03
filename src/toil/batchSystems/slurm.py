@@ -29,6 +29,7 @@ from six import iteritems
 
 from toil.batchSystems import MemoryString
 from toil.batchSystems.abstractGridEngineBatchSystem import AbstractGridEngineBatchSystem
+from toil.batchSystems.abstractGridEngineBatchSystem import with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
             # -h for no header
             # --format to get jobid i, state %t and time days-hours:minutes:seconds
 
-            lines = subprocess.check_output(['squeue', '-h', '--format', '%i %t %M']).decode('utf-8').split('\n')
+            lines = with_retries(subprocess.check_output, ['squeue', '-h', '--format', '%i %t %M']).decode('utf-8').split('\n')
             for line in lines:
                 values = line.split()
                 if len(values) < 3:
@@ -59,14 +60,14 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
             return times
 
         def killJob(self, jobID):
-            subprocess.check_call(['scancel', self.getBatchSystemID(jobID)])
+            with_retries(subprocess.check_call, ['scancel', self.getBatchSystemID(jobID)])
 
         def prepareSubmission(self, cpu, memory, jobID, command):
             return self.prepareSbatch(cpu, memory, jobID) + ['--wrap={}'.format(command)]
 
         def submitJob(self, subLine):
             try:
-                output = subprocess.check_output(subLine, stderr=subprocess.STDOUT).decode('utf-8')
+                output = with_retries(subprocess.check_output, subLine, stderr=subprocess.STDOUT).decode('utf-8')
                 # sbatch prints a line like 'Submitted batch job 2954103'
                 result = int(output.strip().split()[-1])
                 logger.debug("sbatch submitted job %d", result)
@@ -99,7 +100,7 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
                     '-P', # separate columns with pipes
                     '-S', '1970-01-01'] # override start time limit
             
-            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            process = with_retries(subprocess.Popen, args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             rc = process.returncode
             
             if rc != 0:
@@ -125,7 +126,7 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
                     'job',
                     str(slurmJobID)]
     
-            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            process = with_retries(subprocess.Popen, args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     
             job = dict()
             for line in process.stdout:
@@ -142,7 +143,10 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
                 # added to a dictionary
                 for v in values:
                     bits = v.split('=')
-                    job[bits[0]] = bits[1]
+
+                    # 01/03/22 compatibility fix
+                    if len(bits) > 1:
+                        job[bits[0]] = bits[1]
     
             state = job['JobState']
             try:
@@ -227,7 +231,7 @@ class SlurmBatchSystem(AbstractGridEngineBatchSystem):
         # --format to get memory, cpu
         max_cpu = 0
         max_mem = MemoryString('0')
-        lines = subprocess.check_output(['sinfo', '-Nhe', '--format', '%m %c']).decode('utf-8').split('\n')
+        lines = with_retries(subprocess.check_output, ['sinfo', '-Nhe', '--format', '%m %c']).decode('utf-8').split('\n')
         for line in lines:
             values = line.split()
             if len(values) < 2:
