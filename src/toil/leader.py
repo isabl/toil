@@ -23,6 +23,7 @@ standard_library.install_aliases()
 from builtins import str
 from builtins import object
 from builtins import super
+from uuid import uuid4
 import logging
 import time
 import os
@@ -42,6 +43,7 @@ from toil.statsAndLogging import StatsAndLogging
 from toil.job import JobNode, ServiceJobNode
 from toil.toilState import ToilState
 from toil.common import ToilMetrics
+from toil import subprocess
 
 logger = logging.getLogger( __name__ )
 
@@ -439,8 +441,12 @@ class Leader(object):
             #process that deletes jobs and then feeds them back into the set
             #of jobs to be processed
             if jobGraph.remainingRetryCount > 0:
-                self.issueJob(JobNode.fromJobGraph(jobGraph))
-                logger.debug("Job: %s is empty, we are scheduling to clean it up", jobGraph.jobStoreID)
+
+                # ISABL update 08/01/2022, dont resubmit empty jobs, delete them here
+                node = JobNode.fromJobGraph(jobGraph)
+                node.empty = True
+                logger.info("Job: %s is empty, we are scheduling to clean it up", node)
+                self.issueJob(node)
             else:
                 self.processTotallyFailedJob(jobGraph)
                 logger.warn("Job: %s is empty but completely failed - something is very wrong", jobGraph.jobStoreID)
@@ -494,8 +500,8 @@ class Leader(object):
                 if self.toilMetrics:
                     self.toilMetrics.logCompletedJob(updatedJob)
             else:
-                logger.warn('Job failed with exit value %i: %s',
-                            result, updatedJob)
+                logger.warn('Job failed with exit value %i:\n\t%s,\n\t%s,\n\t%s',
+                            result, updatedJob, jobID, str(getattr(updatedJob, "__dict__", None)))
             self.processFinishedJob(jobID, result, wallTime=wallTime)
 
     def _processLostJobs(self):
@@ -601,6 +607,16 @@ class Leader(object):
                                     jobNode.jobName,
                                     self.jobStoreLocator,
                                     jobNode.jobStoreID))
+
+        # ISABL update 08/01/2022,dont resubmit empty jobs, delete them here
+        if getattr(jobNode, "empty", False):
+            subprocess.check_call(jobNode.command.split())
+            jobBatchSystemID = str(uuid4())
+            self.jobBatchSystemIDToIssuedJob[jobBatchSystemID] = jobNode
+            self.processFinishedJob(jobBatchSystemID, 0, 0)
+            logger.info("Succesfully deleted empty job %s", jobNode)
+            return
+
         # jobBatchSystemID is an int that is an incremented counter for each job
         jobBatchSystemID = self.batchSystem.issueBatchJob(jobNode)
         self.jobBatchSystemIDToIssuedJob[jobBatchSystemID] = jobNode
