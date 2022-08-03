@@ -18,6 +18,7 @@ from builtins import str
 from datetime import datetime
 import logging
 import time
+import random
 from threading import Thread, Lock
 from abc import ABCMeta, abstractmethod
 
@@ -33,7 +34,30 @@ from toil.batchSystems.abstractBatchSystem import BatchSystemLocalSupport
 logger = logging.getLogger(__name__)
 
 
+
 def with_retries(operation, *args, **kwargs):
+    """Add a random sleep after each retry."""
+    latest_err = Exception
+
+    for i in range(11):
+        try:
+            return operation(*args, **kwargs)
+        except subprocess.CalledProcessError as err:
+            wait_time = (2 ** i) + random.uniform(-i, i)
+            time.sleep(wait_time)
+            latest_err = err
+            logger.error("Retrying in %s", str(wait_time))
+            logger.error(
+                "Operation %s failed with code %d: %s",
+                operation,
+                err.returncode,
+                err.output,
+            )
+
+    raise latest_err  # pragma: no cover
+
+
+def _with_retries(operation, *args, **kwargs):
     retries = 3
     latest_err = None
     while retries:
