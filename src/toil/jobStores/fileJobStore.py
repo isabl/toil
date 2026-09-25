@@ -66,11 +66,10 @@ class FileJobStore(AbstractJobStore):
         """
         super(FileJobStore, self).__init__()
         self.jobStoreDir = absSymPath(path)
-        logger.debug("Path to job store directory is '%s'.", self.jobStoreDir)
         # Directory where temporary files go
         self.tempFilesDir = os.path.join(self.jobStoreDir, 'tmp')
         self.linkImports = None
-        
+
     def __repr__(self):
         return 'FileJobStore({})'.format(self.jobStoreDir)
 
@@ -101,7 +100,7 @@ class FileJobStore(AbstractJobStore):
         Borrowing patterns from:
         https://github.com/hashdist/hashdist
         """
-        
+
         delay = 1
         for _ in range(max_retries):
             try:
@@ -115,7 +114,7 @@ class FileJobStore(AbstractJobStore):
         if os.path.exists(path):
             # Final attempt, pass any Exceptions up to caller.
             shutil.rmtree(path)
-        
+
     def destroy(self):
         if os.path.exists(self.jobStoreDir):
             self.robust_rmtree(self.jobStoreDir)
@@ -149,15 +148,15 @@ class FileJobStore(AbstractJobStore):
 
     def waitForExists(self, jobStoreID, maxTries=35, sleepTime=1):
         """Spin-wait and block for a file to appear before returning False if it does not.
-        
+
         The total max wait time is maxTries * sleepTime. The current default is
         tuned to match Linux NFS defaults where the client's cache of the directory
         listing on the server is supposed to become coherent within 30 sec.
         Delayes beyond that would probably indicate a pathologically slow file system
         that just should not be used for the jobStore.
-        
+
         The warning will be sent to the log only on the first retry.
-        
+
         In practice, the need for retries happens rarely, but it does happen
         over the course of large workflows with a jobStore on a busy NFS."""
         for iTry in range(1,maxTries+1):
@@ -174,7 +173,7 @@ class FileJobStore(AbstractJobStore):
 
     def exists(self, jobStoreID):
         return os.path.exists(self._getJobFileName(jobStoreID))
-    
+
     def getPublicUrl(self, jobStoreFileID):
         self._checkJobStoreFileID(jobStoreFileID)
         jobStorePath = self._getAbsPath(jobStoreFileID)
@@ -194,8 +193,32 @@ class FileJobStore(AbstractJobStore):
         self._checkJobStoreId(jobStoreID)
         # Load a valid version of the job
         jobFile = self._getJobFileName(jobStoreID)
-        with open(jobFile, 'rb') as fileHandle:
-            job = pickle.load(fileHandle)
+
+        # Juan M. 01/11/22, its possible that the jobFile is corrupted
+        # in this case try reading the .new file
+        try:
+            with open(jobFile, 'rb') as fileHandle:
+                job = pickle.load(fileHandle)
+
+        except EOFError:
+            from glob import glob
+            from os.path import getctime
+            backups = glob(self.get_backup_path(jobFile) + ".backup.*")
+            backups =sorted(backups, key=getctime, reverse=True)
+
+            for i in backups:
+                try:
+                    with open(i, 'rb') as fileHandle:
+                        logger.warn("Recovering job from backup: %s", jobStoreID)
+                        job = pickle.load(fileHandle)
+
+                    self.update(job)
+                    break
+                except (IOError, EOFError):
+                    pass
+            else:
+                raise EOFError
+
         # The following cleans up any issues resulting from the failure of the
         # job during writing by the batch system.
         if os.path.isfile(jobFile + ".new"):
@@ -204,15 +227,42 @@ class FileJobStore(AbstractJobStore):
             job.setupJobAfterFailure(self.config)
         return job
 
+    def get_backup_path(self, job_path):
+        from os.path import dirname
+        from os.path import basename
+        from os.path import isdir
+        from os.path import join
+
+        job_name = basename(job_path)
+        job_dir = dirname(job_path)
+        backup_dir = join(dirname(job_dir), "." + basename(job_dir))
+
+        if not isdir(backup_dir):
+            from toil import subprocess
+            subprocess.check_call(["mkdir", "-p", backup_dir])
+
+        return join(backup_dir, job_name)
+
+
     def update(self, job):
         # The job is serialised to a file suffixed by ".new"
         # The file is then moved to its correct path.
         # Atomicity guarantees use the fact the underlying file systems "move"
         # function is atomic.
-        with open(self._getJobFileName(job.jobStoreID) + ".new", 'wb') as f:
-            pickle.dump(job, f)
-        # This should be atomic for the file system
-        os.rename(self._getJobFileName(job.jobStoreID) + ".new", self._getJobFileName(job.jobStoreID))
+        dst = self._getJobFileName(job.jobStoreID)
+        src = self._getJobFileName(job.jobStoreID) + ".new"
+
+        # Juan M. 01/11/22 keep a backup in case the `job` file gets corrupted
+        # by leaving a backup we can recover from zero size job files
+        from uuid import uuid4
+        backup = self.get_backup_path(dst) + ".backup.{}".format(uuid4())
+
+        with open(src, 'wb') as f_1, open(backup, 'wb') as f_2:
+            pickle.dump(job, f_1)
+            pickle.dump(job, f_2)
+
+        # This should be atomic for the file system, unless the filesystem crashes
+        os.rename(src, dst)
 
     def delete(self, jobStoreID):
         # The jobStoreID is the relative path to the directory containing the job,
@@ -229,7 +279,8 @@ class FileJobStore(AbstractJobStore):
                         yield self.load(self._getRelativePath(os.path.join(tempDir, i)))
                     except NoSuchJobException:
                         # An orphaned job may leave an empty or incomplete job file which we can safely ignore
-                        pass
+                        from toil import subprocess
+                        subprocess.check_call(["rm", "-r", os.path.join(tempDir, i)])
 
     ##########################################
     # Functions that deal with temporary files associated with jobs
@@ -328,7 +379,7 @@ class FileJobStore(AbstractJobStore):
         placeholder string if the function name is unsuitable or can't be
         gotten.
         """
-        
+
         # Record the name of the job/function writing the file in the file name
         try:
             # It ought to be fourth-to-last on the stack, above us, the write
@@ -339,7 +390,7 @@ class FileJobStore(AbstractJobStore):
             # make sure the function name fetched has no spaces or oddities
         if not re.match("^[A-Za-z0-9_-]*$", sourceFunctionName):
             sourceFunctionName = "ODDLYNAMEDJOB"
-            
+
         return sourceFunctionName
 
     def writeFile(self, localFilePath, jobStoreID=None):
